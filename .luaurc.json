@@ -1,0 +1,15 @@
+{
+  "languageMode": "nonstrict",
+  "ignoreGlobs": [
+    "src/ReplicatedStorage/Shared/Packages/**",
+    "sync/ReplicatedStorage/Shared/Packages/**",
+    "sync/Workspace/**"
+  ],
+  "lint": {
+    "*": true,
+    "LocalUnused": false,
+    "ImportUnused": false,
+    "SameLineStatement": false,
+    "FunctionUnused": false
+  }
+}

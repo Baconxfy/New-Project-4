@@ -1,0 +1,6 @@
+std = "roblox"
+
+[lints]
+unused_variable = "allow"
+multiple_statements = "allow"
+allow_unused_self = true

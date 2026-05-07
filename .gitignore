@@ -1,0 +1,21 @@
+# Ignore everything by default
+*
+
+# Allow folders so git can scan inside them
+!*/
+
+# Track these folders
+!/src/**
+!/sync/**
+
+# Track these root files
+!/.gitignore
+!/default.project.json
+!/README.md
+!/selene.toml
+!/.config.luau
+!/.luaurc.json
+!/.worker.js
+
+# Do NOT track sourcemap
+/sourcemap.json

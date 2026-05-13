@@ -5,7 +5,6 @@
 !*/
 
 # Track these folders
-!/src/**
 !/sync/**
 
 # Track these root files
@@ -15,7 +14,6 @@
 !/selene.toml
 !/.config.luau
 !/.luaurc.json
-!/.worker.js
 
 # Do NOT track sourcemap
 /sourcemap.json

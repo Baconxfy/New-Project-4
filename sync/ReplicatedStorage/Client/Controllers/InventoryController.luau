@@ -4,9 +4,10 @@ local Framework: any = require(game:GetService('ReplicatedStorage').Framework ::
 
 local InventoryController = Framework:CreateController('InventoryController')
 
-local LUCKYBLOCK_ITEM_TYPE = 'Luckyblock'
 local InventoryItemClient = Framework.Components.InventoryItemClient
-local LuckyblockClient = Framework.Components.LuckyblockClient
+local componentClassCache = {}
+local INVENTORY_SLOT_ATTRIBUTE = 'InventorySlot'
+local INVENTORY_MODEL_ID_ATTRIBUTE = 'InventoryModelId'
 
 local SLOT_KEYCODES = {
 	[Enum.KeyCode.One] = 1,
@@ -38,15 +39,25 @@ end
 function InventoryController:Initialize()
 	self.Player = Players.LocalPlayer
 	self.Backpack = nil
+	self.InventoryGui = nil
+	self.InventoryUi = nil
 	self.Items = {}
 	self.ItemsBySlot = {}
 	self.SelectedSlot = nil
 	self.EquippedSlot = nil
 	self.KeybindsEnabled = true
+	self.ActionsEnabled = true
 	self.Changed = Instance.new('BindableEvent')
 	self.BackpackToggleRequested = Instance.new('BindableEvent')
 	self.ItemComponents = {}
 	self._connections = {}
+	self._snapshotRequestId = 0
+	self._snapshotApplyId = 0
+	self._inventoryActionActive = false
+	self._queuedInventorySlot = nil
+	self._queuedInventoryToSlot = nil
+	self._queuedInventoryMode = nil
+	self._suppressModelSnapshotsUntil = 0
 end
 
 function InventoryController:Start()
@@ -59,21 +70,37 @@ function InventoryController:Start()
 		self:RequestInitialSnapshot()
 	end))
 	self:BindKeybinds()
+	self:BindInventoryGui()
 	self:RequestInitialSnapshot()
+end
+
+function InventoryController:BindInventoryGui()
+	if self.InventoryUi then
+		return
+	end
+
+	local playerGui = self.Player:WaitForChild('PlayerGui')
+	self.InventoryGui = self.InventoryGui and self.InventoryGui.Parent and self.InventoryGui or playerGui:WaitForChild('InventoryGui', 10)
+	if self.InventoryGui then
+		self.InventoryUi = Framework.Components.InventoryGuiClient:new(self.InventoryGui, self)
+		self:AddChild(self.InventoryUi)
+	else
+		warn('[InventoryController] Missing InventoryGui')
+	end
 end
 
 function InventoryController:BindBackpack(backpack: Backpack)
 	self:DisconnectConnections(self._connections)
 
 	table.insert(self._connections, backpack.ChildAdded:Connect(function(child)
-		if isInventoryCandidate(child) then
-			self:RequestInitialSnapshot()
+		if isInventoryCandidate(child) and not self:ShouldSuppressModelSnapshot() then
+			self:RequestSnapshotSoon()
 		end
 	end))
 
 	table.insert(self._connections, backpack.ChildRemoved:Connect(function(child)
-		if isInventoryCandidate(child) then
-			self:RequestInitialSnapshot()
+		if isInventoryCandidate(child) and not self:ShouldSuppressModelSnapshot() then
+			self:RequestSnapshotSoon()
 		end
 	end))
 end
@@ -86,14 +113,14 @@ function InventoryController:BindCharacter(character: Model?)
 	end
 
 	table.insert(self._characterConnections, character.ChildAdded:Connect(function(child)
-		if isInventoryCandidate(child) then
-			self:RequestInitialSnapshot()
+		if isInventoryCandidate(child) and not self:ShouldSuppressModelSnapshot() then
+			self:RequestSnapshotSoon()
 		end
 	end))
 
 	table.insert(self._characterConnections, character.ChildRemoved:Connect(function(child)
-		if isInventoryCandidate(child) then
-			self:RequestInitialSnapshot()
+		if isInventoryCandidate(child) and not self:ShouldSuppressModelSnapshot() then
+			self:RequestSnapshotSoon()
 		end
 	end))
 end
@@ -118,8 +145,28 @@ function InventoryController:BindKeybinds()
 	end)
 end
 
+function InventoryController:ShouldSuppressModelSnapshot(): boolean
+	return os.clock() < (self._suppressModelSnapshotsUntil or 0)
+end
+
 function InventoryController:SetKeybindsEnabled(enabled: boolean)
 	self.KeybindsEnabled = enabled == true
+end
+
+function InventoryController:SetActionsEnabled(enabled: boolean)
+	self.ActionsEnabled = enabled == true
+	self:SetKeybindsEnabled(enabled)
+
+	if self.ActionsEnabled then
+		self:RequestSnapshotSoon()
+		return
+	end
+
+	self._queuedInventoryMode = nil
+	self._queuedInventorySlot = nil
+	self._queuedInventoryToSlot = nil
+	self._suppressModelSnapshotsUntil = os.clock() + 0.35
+	self:ApplyOptimisticEquip(nil)
 end
 
 function InventoryController:HandleInputBegan(input: InputObject, gameProcessed: boolean)
@@ -148,27 +195,71 @@ function InventoryController:RequestInitialSnapshot()
 	self:ApplySnapshot(snapshot)
 end
 
-function InventoryController:ApplySnapshot(snapshot)
+function InventoryController:RequestSnapshotSoon()
+	self._snapshotRequestId += 1
+	local requestId = self._snapshotRequestId
+	task.delay(0.08, function()
+		if self._snapshotRequestId == requestId then
+			self:RequestInitialSnapshot()
+		end
+	end)
+end
+
+function InventoryController:ApplySnapshot(snapshot, retryCount: number?)
+	self._snapshotApplyId += 1
+	local applyId = self._snapshotApplyId
 	local items = {}
-	local modelsBySlot = self:GetInventoryModelsBySlot(snapshot or {})
+	local modelLookup = self:GetInventoryModelLookup(snapshot or {})
+	local missingModel = false
 
 	for _, item in ipairs(snapshot or {}) do
 		local copy = table.clone(item)
-		copy.Model = modelsBySlot[copy.Slot]
+		copy.Model = if typeof(copy.Model) == 'Instance' then copy.Model else self:ResolveInventoryModel(copy, modelLookup)
+		if not copy.Model then
+			missingModel = true
+		end
 		table.insert(items, copy)
 	end
 
 	self:SetItems(items)
+
+	if missingModel and (retryCount or 0) < 3 then
+		task.delay(0.12, function()
+			if self._alive and self._snapshotApplyId == applyId then
+				self:ApplySnapshot(snapshot, (retryCount or 0) + 1)
+			end
+		end)
+	end
 end
 
-function InventoryController:GetInventoryModelsBySlot(snapshot)
+function InventoryController:GetInventoryModelLookup(snapshot)
 	local backpackModels = {}
 	local equippedModels = {}
+	local modelsById = {}
+	local modelsBySlot = {}
+
+	local function trackModel(model: Model, equipped: boolean)
+		local modelId = model:GetAttribute(INVENTORY_MODEL_ID_ATTRIBUTE)
+		if type(modelId) == 'string' then
+			modelsById[modelId] = model
+		end
+
+		local slot = model:GetAttribute(INVENTORY_SLOT_ATTRIBUTE)
+		if type(slot) == 'number' then
+			modelsBySlot[slot] = model
+		end
+
+		if equipped then
+			table.insert(equippedModels, model)
+		else
+			table.insert(backpackModels, model)
+		end
+	end
 
 	if self.Backpack then
 		for _, child in ipairs(self.Backpack:GetChildren()) do
 			if isInventoryCandidate(child) then
-				table.insert(backpackModels, child)
+				trackModel(child, false)
 			end
 		end
 	end
@@ -177,25 +268,39 @@ function InventoryController:GetInventoryModelsBySlot(snapshot)
 	if character then
 		for _, child in ipairs(character:GetChildren()) do
 			if isInventoryCandidate(child) then
-				table.insert(equippedModels, child)
+				trackModel(child, true)
 			end
 		end
 	end
 
-	local modelsBySlot = {}
 	local backpackIndex = 0
 	local equippedIndex = 0
 	for _, item in ipairs(snapshot) do
-		if item.Equipped then
+		if not modelsBySlot[item.Slot] and item.Equipped then
 			equippedIndex += 1
 			modelsBySlot[item.Slot] = equippedModels[equippedIndex]
-		else
+		elseif not modelsBySlot[item.Slot] then
 			backpackIndex += 1
 			modelsBySlot[item.Slot] = backpackModels[backpackIndex]
 		end
 	end
 
-	return modelsBySlot
+	return {
+		ById = modelsById,
+		BySlot = modelsBySlot,
+	}
+end
+
+function InventoryController:ResolveInventoryModel(item, modelLookup)
+	local modelId = item and item.ModelId
+	if type(modelId) == 'string' then
+		local model = modelLookup.ById[modelId]
+		if model then
+			return model
+		end
+	end
+
+	return modelLookup.BySlot[item and item.Slot]
 end
 
 function InventoryController:SetItems(items)
@@ -215,28 +320,62 @@ function InventoryController:SetItems(items)
 	end
 
 	self:SyncItemComponents()
-	self.Changed:Fire(self:GetItems(), self.SelectedSlot, self.EquippedSlot)
+	self.Changed:Fire(self.Items, self.SelectedSlot, self.EquippedSlot)
 end
 
 function InventoryController:GetComponentClassForItem(item)
-	if item.ItemType == LUCKYBLOCK_ITEM_TYPE then
-		return LuckyblockClient
+	local itemType = item.ItemType
+	if type(itemType) ~= 'string' or itemType == '' then
+		return InventoryItemClient
 	end
+
+	if componentClassCache[itemType] ~= nil then
+		return componentClassCache[itemType]
+	end
+
+	local candidates = {
+		itemType .. 'Client',
+		itemType .. 'InventoryItemClient',
+	}
+
+	for _, className in ipairs(candidates) do
+		local ok, class = pcall(function()
+			return Framework.Components[className]
+		end)
+		if ok and type(class) == 'table' then
+			componentClassCache[itemType] = class
+			return class
+		end
+	end
+
+	componentClassCache[itemType] = InventoryItemClient
 	return InventoryItemClient
 end
 
 function InventoryController:SyncItemComponents()
 	local seen = {}
+	local modelLookup = nil
 	for _, item in ipairs(self.Items) do
 		seen[item.Slot] = true
 		local component = self.ItemComponents[item.Slot]
+		local componentClass = self:GetComponentClassForItem(item)
+		if not item.Model then
+			modelLookup = modelLookup or self:GetInventoryModelLookup(self.Items)
+			item.Model = self:ResolveInventoryModel(item, modelLookup)
+		end
+		if component and component.ItemType ~= item.ItemType then
+			component:Destroy()
+			component = nil
+			self.ItemComponents[item.Slot] = nil
+		end
+
 		if component then
 			if item.Model then
 				component:SetModel(item.Model)
 			end
 			component:SetEquipped(item.Equipped)
 		elseif item.Model then
-			component = self:GetComponentClassForItem(item):new(item.Model, item.Slot, item.ItemType)
+			component = componentClass:new(item.Model, item.Slot, item.ItemType)
 			component:SetEquipped(item.Equipped)
 			self.ItemComponents[item.Slot] = component
 		end
@@ -266,28 +405,109 @@ function InventoryController:GetSlotItem(slot: number)
 	return self.ItemsBySlot[slot]
 end
 
-function InventoryController:ToggleSlot(slot: number)
-	local item = self:GetSlotItem(slot)
-	if not item then
+function InventoryController:RunInventoryAction(mode: string, slot: number?, toSlot: number?)
+	if not self.ActionsEnabled then
 		return false
 	end
 
-	self:SelectSlot(slot)
-	local snapshot = self.InventoryService:ToggleSlot(slot)
-	self:ApplySnapshot(snapshot)
+	self._queuedInventoryMode = mode
+	self._queuedInventorySlot = slot
+	self._queuedInventoryToSlot = toSlot
+	if self._inventoryActionActive then
+		return true
+	end
+
+	self._inventoryActionActive = true
+	task.spawn(function()
+		while self._queuedInventoryMode do
+			if not self.ActionsEnabled then
+				self._queuedInventoryMode = nil
+				self._queuedInventorySlot = nil
+				self._queuedInventoryToSlot = nil
+				break
+			end
+
+			local currentMode = self._queuedInventoryMode
+			local currentSlot = self._queuedInventorySlot
+			local currentToSlot = self._queuedInventoryToSlot
+			self._queuedInventoryMode = nil
+			self._queuedInventorySlot = nil
+			self._queuedInventoryToSlot = nil
+
+			self._suppressModelSnapshotsUntil = os.clock() + 0.35
+
+			local ok, snapshot = pcall(function()
+				if currentMode == 'Unequip' then
+					return self.InventoryService:UnequipItem()
+				elseif currentMode == 'Equip' and currentSlot then
+					return self.InventoryService:EquipSlot(currentSlot)
+				elseif currentMode == 'Move' and currentSlot and currentToSlot then
+					return self.InventoryService:MoveSlot(currentSlot, currentToSlot)
+				end
+				return nil
+			end)
+			if ok and snapshot and not self._queuedInventoryMode then
+				self:ApplySnapshot(snapshot)
+			elseif not ok then
+				warn(('[InventoryController] Inventory action failed: %s'):format(tostring(snapshot)))
+			end
+		end
+		self._inventoryActionActive = false
+	end)
+
 	return true
 end
 
-function InventoryController:EquipSlot(slot: number)
+function InventoryController:ApplyOptimisticEquip(slot: number?)
+	if self.EquippedSlot == slot then
+		return
+	end
+
+	self.EquippedSlot = slot
+	self.Changed:Fire(self.Items, self.SelectedSlot, self.EquippedSlot)
+end
+
+function InventoryController:ToggleSlot(slot: number)
+	if not self.ActionsEnabled then
+		return false
+	end
+
 	local item = self:GetSlotItem(slot)
 	if not item then
 		return false
 	end
 
 	self:SelectSlot(slot)
-	local snapshot = self.InventoryService:EquipSlot(slot)
-	self:ApplySnapshot(snapshot)
-	return true
+	local shouldUnequip = self.EquippedSlot == slot
+	self:ApplyOptimisticEquip(if shouldUnequip then nil else slot)
+	return self:RunInventoryAction(if shouldUnequip then 'Unequip' else 'Equip', slot)
+end
+
+function InventoryController:MoveSlot(fromSlot: number, toSlot: number)
+	if not self.ActionsEnabled then
+		return false
+	end
+
+	if fromSlot == toSlot or not self:GetSlotItem(fromSlot) then
+		return false
+	end
+
+	return self:RunInventoryAction('Move', fromSlot, toSlot)
+end
+
+function InventoryController:EquipSlot(slot: number)
+	if not self.ActionsEnabled then
+		return false
+	end
+
+	local item = self:GetSlotItem(slot)
+	if not item then
+		return false
+	end
+
+	self:SelectSlot(slot)
+	self:ApplyOptimisticEquip(slot)
+	return self:RunInventoryAction('Equip', slot)
 end
 
 function InventoryController:SelectSlot(slot: number?)
@@ -295,8 +515,12 @@ function InventoryController:SelectSlot(slot: number?)
 		return false
 	end
 
+	if self.SelectedSlot == slot then
+		return true
+	end
+
 	self.SelectedSlot = slot
-	self.Changed:Fire(self:GetItems(), self.SelectedSlot, self.EquippedSlot)
+	self.Changed:Fire(self.Items, self.SelectedSlot, self.EquippedSlot)
 	return true
 end
 
@@ -309,12 +533,18 @@ function InventoryController:GetEquippedItem()
 end
 
 function InventoryController:UnequipItem()
-	local snapshot = self.InventoryService:UnequipItem()
-	self:ApplySnapshot(snapshot)
-	return true
+	if not self.ActionsEnabled then
+		return false
+	end
+
+	self:ApplyOptimisticEquip(nil)
+	return self:RunInventoryAction('Unequip', nil)
 end
 
 function InventoryController.Server:InventoryChanged(snapshot)
+	if self._inventoryActionActive or self:ShouldSuppressModelSnapshot() then
+		return
+	end
 	self:ApplySnapshot(snapshot)
 end
 

@@ -2,7 +2,7 @@ local Framework: any = require(game:GetService("ReplicatedStorage").Framework ::
 
 local ConveyorService = Framework:CreateService("ConveyorService")
 
-local SPEED = 80
+local DEFAULT_SPEED = 80
 
 function ConveyorService:Start()
 	local conveyor = workspace:WaitForChild("Conveyor")
@@ -13,7 +13,8 @@ end
 
 function ConveyorService:SetConveyor(part: BasePart, direction: number)
 	part.Anchored = true
-	part.AssemblyLinearVelocity = part.CFrame.RightVector * SPEED * direction
+	local speed = (self.Framework.Config.Conveyor and self.Framework.Config.Conveyor.Speed) or DEFAULT_SPEED
+	part.AssemblyLinearVelocity = part.CFrame.RightVector * speed * direction
 end
 
 return ConveyorService

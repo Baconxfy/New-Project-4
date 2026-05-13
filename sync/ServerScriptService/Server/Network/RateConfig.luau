@@ -3,7 +3,7 @@ local Config = require(ServerRoot.Config :: ModuleScript)
 
 local RateConfig = {}
 
-local RL = (Config and Config.RateLimits) or {}
+local RL = (Config and (Config.RateLimits or (Config.Shared and Config.Shared.RateLimits))) or {}
 local Default = RL.Default -- may be nil; we handle that downstream
 
 -- Normalize a config table into {capacity, refill, every}

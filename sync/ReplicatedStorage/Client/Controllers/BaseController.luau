@@ -18,9 +18,17 @@ function BaseController.Server:ClaimBase(baseFolder: Folder)
 	end
 
 	if self.BaseClient then
-		self.BaseClient:Destroy()
+		local oldBaseClient = self.BaseClient
+		self.BaseClient = nil
+		oldBaseClient:Destroy()
 	end
 	self.BaseClient = Framework.Components.BaseClient:new(baseFolder)
+end
+
+function BaseController.Server:PadUpgradeChanged(state)
+	if self.BaseClient and rawget(self.BaseClient, '_alive') then
+		self.BaseClient:ApplyPadUpgradeState(state)
+	end
 end
 
 

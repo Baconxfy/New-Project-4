@@ -13,6 +13,7 @@ function BaseClient:Create(baseFolder: Folder)
 	self.BaseFolder = baseFolder
 	self.SpawnLocation = baseFolder:FindFirstChildWhichIsA('SpawnLocation', true)
 	self.Pads = {}
+	self.PadUpgrade = nil
 
 	local padsFolder = baseFolder:FindFirstChild('Pads', true)
 	if not padsFolder then
@@ -22,8 +23,22 @@ function BaseClient:Create(baseFolder: Folder)
 
 	for _, padModel in ipairs(padsFolder:GetChildren()) do
 		if padModel:IsA('Model') then
-			table.insert(self.Pads, self.Framework.Components.PadClient:new(padModel))
+			local pad = self.Framework.Components.PadClient:new(padModel)
+			table.insert(self.Pads, pad)
+			self:AddChild(pad)
 		end
+	end
+
+	local padUpgrade = baseFolder:FindFirstChild('PadUpgrade', true) or baseFolder:FindFirstChild('Pad Upgrade', true)
+	if padUpgrade and padUpgrade:IsA('Model') then
+		self.PadUpgrade = self.Framework.Components.PadUpgradeClient:new(padUpgrade)
+		self:AddChild(self.PadUpgrade)
+	end
+end
+
+function BaseClient:ApplyPadUpgradeState(state)
+	if self.PadUpgrade then
+		self.PadUpgrade:ApplyState(state)
 	end
 end
 

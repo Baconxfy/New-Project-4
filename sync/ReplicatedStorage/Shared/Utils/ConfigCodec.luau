@@ -43,6 +43,10 @@ local function encodeValue(v: any): any
 		return { __t = "Vector3", x = a.X, y = a.Y, z = a.Z }
 	end
 
+	if tv == "CFrame" then
+		return { __t = "CFrame", components = { (v :: CFrame):GetComponents() } }
+	end
+
 	if tv == "table" then
 		local out = {}
 		for k, val in pairs(v) do
@@ -86,6 +90,10 @@ local function decodeValue(v: any): any
 
 	if tag == "Vector3" then
 		return Vector3.new(v.x, v.y, v.z)
+	end
+
+	if tag == "CFrame" then
+		return CFrame.new(table.unpack(v.components))
 	end
 
 	-- regular table

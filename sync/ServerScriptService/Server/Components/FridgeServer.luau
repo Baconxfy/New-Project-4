@@ -10,6 +10,10 @@ local CLICK_COOLDOWN = 0.08
 local XP_PER_PUMP = 10
 local MIN_BLOCK_SCALE = 0.35
 local MAX_BLOCK_SCALE = 1
+local XP_ATTRIBUTE = 'LuckyblockXP'
+local TIER_ATTRIBUTE = 'LuckyblockTier'
+local PROGRESS_ATTRIBUTE = 'LuckyblockProgress'
+local LUCK_ATTRIBUTE = 'LuckyblockLuck'
 
 local function getBlockOrder(config)
 	local order = {}
@@ -39,6 +43,25 @@ local function findDescendantByName(root: Instance, name: string): Instance?
 	return nil
 end
 
+local function getTextLabel(root: Instance, name: string): TextLabel?
+	local wanted = string.lower(name)
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA('TextLabel') and string.lower(descendant.Name) == wanted then
+			return descendant
+		end
+	end
+	return nil
+end
+
+local function formatNumber(value: number): string
+	if value >= 1000000 then
+		return ('%.1fM'):format(value / 1000000):gsub('%.0M', 'M')
+	elseif value >= 1000 then
+		return ('%.1fK'):format(value / 1000):gsub('%.0K', 'K')
+	end
+	return tostring(math.floor(value))
+end
+
 function FridgeServer:Create(fridgeModel: Model, baseServer: any?)
 	self.Model = fridgeModel
 	self.Base = baseServer
@@ -54,6 +77,10 @@ function FridgeServer:Create(fridgeModel: Model, baseServer: any?)
 	self.XPPerPump = XP_PER_PUMP
 	self.MinScale = MIN_BLOCK_SCALE
 	self.MaxScale = MAX_BLOCK_SCALE
+	self.LevelLabel = getTextLabel(fridgeModel, 'Level')
+	self.XPLabel = getTextLabel(fridgeModel, 'XP')
+	self.XPHolder = self.XPLabel and self.XPLabel.Parent or nil
+	self.XPBar = self.XPLabel and self.XPLabel.Parent and self.XPLabel.Parent:FindFirstChild('Holder') or nil
 
 	if not self.Button or not self.Button:IsA('BasePart') then
 		warn(('[FridgeServer] %s is missing a Button part'):format(fridgeModel:GetFullName()))
@@ -87,6 +114,8 @@ function FridgeServer:Create(fridgeModel: Model, baseServer: any?)
 	else
 		warn(('[FridgeServer] %s is missing TakePrompt'):format(fridgeModel:GetFullName()))
 	end
+
+	self:RefreshBillboards()
 end
 
 function FridgeServer:GetBlockName(index: number?): string?
@@ -136,6 +165,73 @@ function FridgeServer:GetBlockProgress(index: number): number
 	return (self.TotalXP - currentRequired) / range
 end
 
+function FridgeServer:GetBlockLuck(index: number?): number
+	local blockIndex = index or self.BlockIndex
+	if not blockIndex then
+		return 1
+	end
+
+	local blockConfig = self:GetBlockConfig(blockIndex) or {}
+	local rollConfig = (self.Framework.Config.Microwave and self.Framework.Config.Microwave.Roll) or {}
+	local baseLuck = tonumber(rollConfig.BaseLuck) or 1
+	local tierJump = tonumber(rollConfig.TierLuckJump) or 1.75
+	local inTierBonus = tonumber(rollConfig.InTierLuckBonus) or 0.55
+	local progress = math.clamp(self:GetBlockProgress(blockIndex), 0, 1)
+	local luckBonus = tonumber(blockConfig.LuckBonus) or 0
+
+	return math.max(0, baseLuck + ((blockIndex - 1) * tierJump) + luckBonus + (progress * inTierBonus))
+end
+
+function FridgeServer:GetNextRequiredXP(): number
+	local nextIndex = (self.BlockIndex or 0) + 1
+	local nextRequired = self:GetRequiredXP(nextIndex)
+	if nextRequired ~= math.huge then
+		return nextRequired
+	end
+	return self:GetRequiredXP(self.BlockIndex or #self.BlockOrder)
+end
+
+function FridgeServer:GetXPProgress(): number
+	if not self.CurrentBlock or not self.BlockIndex then
+		return 0
+	end
+
+	if self.BlockIndex == #self.BlockOrder then
+		return 1
+	end
+
+	return math.clamp(self:GetBlockProgress(self.BlockIndex), 0, 1)
+end
+
+function FridgeServer:RefreshBillboards()
+	local hasBlock = self.CurrentBlock ~= nil
+	if self.LevelLabel then
+		self.LevelLabel.Visible = hasBlock
+	end
+	if self.XPHolder and self.XPHolder:IsA('GuiObject') then
+		self.XPHolder.Visible = hasBlock
+	end
+
+	if self.LevelLabel then
+		self.LevelLabel.Text = ('Level %d'):format(self.BlockIndex or 0)
+	end
+
+	if self.XPLabel then
+		local nextRequired = self:GetNextRequiredXP()
+		if nextRequired == math.huge or self.BlockIndex == #self.BlockOrder then
+			self.XPLabel.Text = ('XP %s / MAX'):format(formatNumber(self.TotalXP))
+		else
+			self.XPLabel.Text = ('XP %s / %s'):format(formatNumber(self.TotalXP), formatNumber(nextRequired))
+		end
+	end
+
+	if self.XPBar and self.XPBar:IsA('GuiObject') then
+		local progress = self:GetXPProgress()
+		local size = self.XPBar.Size
+		self.XPBar.Size = UDim2.new(progress, 0, size.Y.Scale, size.Y.Offset)
+	end
+end
+
 function FridgeServer:SpawnBlock(index: number)
 	local blockName = self:GetBlockName(index)
 	local template = blockName and LUCKYBLOCK_MODELS:FindFirstChild(blockName)
@@ -163,6 +259,7 @@ end
 function FridgeServer:RefreshBlock()
 	local index = self:GetBlockIndexForXP(self.TotalXP)
 	if not index then
+		self:RefreshBillboards()
 		return
 	end
 
@@ -172,11 +269,17 @@ function FridgeServer:RefreshBlock()
 
 	if self.CurrentBlock then
 		self.CurrentBlock:SetProgress(self:GetBlockProgress(index))
+		self.CurrentBlock.Model:SetAttribute(XP_ATTRIBUTE, self.TotalXP)
+		self.CurrentBlock.Model:SetAttribute(TIER_ATTRIBUTE, self.BlockIndex)
+		self.CurrentBlock.Model:SetAttribute(PROGRESS_ATTRIBUTE, math.clamp(self:GetBlockProgress(index), 0, 1))
+		self.CurrentBlock.Model:SetAttribute(LUCK_ATTRIBUTE, self:GetBlockLuck(index))
 	end
 
 	if self.TakePrompt and self.TakePrompt:IsA('ProximityPrompt') then
 		self.TakePrompt.Enabled = self.CurrentBlock ~= nil
 	end
+
+	self:RefreshBillboards()
 end
 
 function FridgeServer:PlayPumpFeedback()
@@ -216,8 +319,14 @@ function FridgeServer:Take(player: Player)
 		return
 	end
 
+	local blockIndex = self.BlockIndex
+	blockModel:SetAttribute(XP_ATTRIBUTE, self.TotalXP)
+	blockModel:SetAttribute(TIER_ATTRIBUTE, blockIndex)
+	blockModel:SetAttribute(PROGRESS_ATTRIBUTE, blockIndex and math.clamp(self:GetBlockProgress(blockIndex), 0, 1) or 0)
+	blockModel:SetAttribute(LUCK_ATTRIBUTE, self:GetBlockLuck(blockIndex))
+
 	local inventoryService = self.Framework:GetService('InventoryService')
-	inventoryService:AddLuckyblock(player, blockModel, blockName)
+	inventoryService:AddItem(player, blockModel, 'Luckyblock', blockName)
 	self:Reset()
 end
 
@@ -232,6 +341,7 @@ function FridgeServer:Reset()
 	if self.TakePrompt and self.TakePrompt:IsA('ProximityPrompt') then
 		self.TakePrompt.Enabled = false
 	end
+	self:RefreshBillboards()
 end
 
 function FridgeServer:CleanUp()

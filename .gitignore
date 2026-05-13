@@ -16,4 +16,4 @@
 !/.luaurc.json
 
 # Do NOT track sourcemap
-/sourcemap.json
+!/sourcemap.json
